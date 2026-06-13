@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+#
+# vse — vintage-sampler-extractor
+#
+# Extract audio from Akai S900 / S1000 / S3000 sampler CD-ROM images (the
+# "ISO" files that aren't really ISO9660) to WAV, and automatically rejoin
+# the Akai format's split -L / -R mono files into proper stereo.
+#
+# Backend: akaiutil (GPL-2.0) by Klaus Michael Indlekofer, with the stereo/loop
+# fork by "neoman", vendored under third_party/akaiutil. Stereo rejoining and
+# WAV validation use ffmpeg/ffprobe.
+#
+# License: GPL-2.0-or-later. See LICENSE.
+#
+# Safety: images are ALWAYS opened read-only (-r); the stereo step verifies a
+# merged file is genuinely 2-channel before deleting its mono pair; true mono
+# samples are never touched.
+
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AKAIUTIL_SRC="$SELF_DIR/third_party/akaiutil"
+BIN="$AKAIUTIL_SRC/akaiutil"
+
+die() { echo "vse: error: $*" >&2; exit 1; }
+
+cmd_build() {
+  [ -f "$AKAIUTIL_SRC/Makefile" ] || die "akaiutil source missing at $AKAIUTIL_SRC"
+  command -v make >/dev/null || die "make not found (install Xcode Command Line Tools, or build-essential on Linux)"
+  echo ">> compiling akaiutil ($(uname -s)/$(uname -m)) ..."
+  ( cd "$AKAIUTIL_SRC" && make ) || die "build failed — a C compiler is required (Xcode CLT / build-essential)"
+  echo ">> built: $BIN"
+}
+
+require_bin() { [ -x "$BIN" ] || die "akaiutil not built yet — run:  $(basename "$0") build"; }
+
+cmd_list() {
+  require_bin
+  local img="${1:-}"
+  [ -n "$img" ] || die "usage: $(basename "$0") list <image>"
+  [ -f "$img" ] || die "no such image: $img"
+  # df = disk summary, dirrec = recursive listing of the whole disk tree
+  printf 'df\ncd /disk0\ndirrec\nexit\n' | "$BIN" -r "$img"
+}
+
+cmd_extract() {
+  require_bin
+  command -v tar >/dev/null || die "tar not found"
+  local img="${1:-}" out="${2:-}"
+  { [ -n "$img" ] && [ -n "$out" ]; } || die "usage: $(basename "$0") extract <image> <outdir>"
+  [ -f "$img" ] || die "no such image: $img"
+  mkdir -p "$out"
+  local out_abs; out_abs="$(cd "$out" && pwd)"
+  local tar_tmp; tar_tmp="$(mktemp -t vse_XXXXXX).tar"
+  echo ">> reading '$img' (read-only) and converting samples to WAV ..."
+  # tarcwav: tar the whole /disk0 tree, converting sample files to WAV on the way out
+  printf 'cd /disk0\ntarcwav %s\nexit\n' "$tar_tmp" | "$BIN" -r "$img"
+  echo ">> unpacking into: $out_abs"
+  tar -xf "$tar_tmp" -C "$out_abs"
+  rm -f "$tar_tmp"
+  # akaiutil stamps directories with file-like mode 0600 (no search bit), which
+  # makes Finder/ls report "permission denied". Capital X adds execute to
+  # directories only, never to plain WAV files.
+  chmod -R u+rwX "$out_abs"
+  echo ">> done: $(find "$out_abs" -iname '*.wav' | wc -l | tr -d ' ') WAV files under $out_abs"
+}
+
+cmd_stereo() {
+  command -v ffmpeg  >/dev/null || die "ffmpeg not found (e.g. 'brew install ffmpeg')"
+  command -v ffprobe >/dev/null || die "ffprobe not found (ships with ffmpeg)"
+  local dir="" dry=0 keep=0
+  for a in "$@"; do
+    case "$a" in
+      --dry-run) dry=1 ;;
+      --keep)    keep=1 ;;
+      -*)        die "unknown option: $a" ;;
+      *)         dir="$a" ;;
+    esac
+  done
+  [ -n "$dir" ] || die "usage: $(basename "$0") stereo <dir> [--dry-run] [--keep]"
+  [ -d "$dir" ] || die "no such dir: $dir"
+
+  local merged=0 skipped=0 failed=0
+  while IFS= read -r -d '' L; do
+    local d b R stem OUT TMP ch
+    d=$(dirname "$L"); b=$(basename "$L")
+    R="$d/${b%-L.wav}-R.wav"                       # partner file
+    if [ ! -f "$R" ]; then skipped=$((skipped+1)); continue; fi
+    stem="${b%-L.wav}"
+    stem="${stem%"${stem##*[![:space:]]}"}"        # rstrip trailing spaces
+    OUT="$d/${stem}.wav"
+    if [ "$dry" -eq 1 ]; then
+      echo "MERGE  '$L' + '$R'  ->  '$OUT'"; merged=$((merged+1)); continue
+    fi
+    TMP="$d/.vse_stereo_tmp_$$.wav"
+    if ! ffmpeg -nostdin -v error -y -i "$L" -i "$R" \
+          -filter_complex "[0:a][1:a]join=inputs=2:channel_layout=stereo[a]" \
+          -map "[a]" -c:a pcm_s16le "$TMP" 2>/dev/null; then
+      echo "FAIL(ffmpeg)  $L"; rm -f "$TMP"; failed=$((failed+1)); continue
+    fi
+    ch=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of csv=p=0 "$TMP" 2>/dev/null)
+    if [ "$ch" != "2" ]; then
+      echo "FAIL(not 2ch: '$ch')  $L"; rm -f "$TMP"; failed=$((failed+1)); continue
+    fi
+    mv "$TMP" "$OUT"
+    [ "$keep" -eq 0 ] && rm -f "$L" "$R"
+    merged=$((merged+1))
+  done < <(find "$dir" -type f -iname '*-L.wav' -print0)
+
+  echo "------------------------------------------------------------"
+  echo "stereo merged : $merged"
+  echo "left as mono  : $skipped   (no -L/-R partner)"
+  echo "failed        : $failed"
+  [ "$dry" -eq 1 ] && echo "(dry-run: nothing changed)"
+  [ "$failed" -eq 0 ] || return 1
+}
+
+cmd_all() {
+  local img="${1:-}" out="${2:-}"
+  { [ -n "$img" ] && [ -n "$out" ]; } || die "usage: $(basename "$0") all <image> <outdir>"
+  cmd_extract "$img" "$out"
+  echo ">> rejoining -L/-R stereo pairs ..."
+  cmd_stereo "$out"
+}
+
+usage() {
+  cat <<EOF
+vse — vintage-sampler-extractor
+
+Extract Akai S900/S1000/S3000 sampler CD-ROM images to WAV, and rejoin the
+format's split -L/-R mono files into stereo.
+
+Usage:
+  vse build                                compile the akaiutil backend (run once)
+  vse list    <image>                      read-only: list partitions/volumes/files
+  vse extract <image> <outdir>             extract all samples -> mono WAV
+  vse stereo  <dir> [--dry-run] [--keep]   rejoin -L/-R pairs -> stereo
+  vse all     <image> <outdir>             extract + stereo merge (common path)
+
+Notes:
+  * Images are ALWAYS opened read-only.
+  * 'stereo' verifies 2-channel output before removing the mono pair;
+    --keep retains the -L/-R originals, --dry-run only previews.
+  * True mono samples (no -L/-R partner) are left untouched.
+
+Requirements: a C compiler (Xcode CLT / build-essential), ffmpeg (for stereo),
+git only if you need to refetch the backend. Tested on macOS (Apple Silicon).
+EOF
+}
+
+main() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    build)             cmd_build   "$@" ;;
+    list)              cmd_list    "$@" ;;
+    extract)           cmd_extract "$@" ;;
+    stereo)            cmd_stereo  "$@" ;;
+    all)               cmd_all     "$@" ;;
+    -h|--help|help|"") usage ;;
+    *)                 echo "vse: unknown command '$sub'" >&2; echo; usage; exit 1 ;;
+  esac
+}
+
+main "$@"

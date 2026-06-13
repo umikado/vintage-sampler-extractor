@@ -1,0 +1,10 @@
+# Compiled akaiutil backend (built locally via `vse build`)
+third_party/akaiutil/akaiutil
+third_party/akaiutil/*.o
+
+# Scratch / extraction artifacts
+*.tar
+.vse_stereo_tmp_*.wav
+
+# macOS
+.DS_Store
