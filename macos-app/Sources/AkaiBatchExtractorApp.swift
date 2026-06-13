@@ -403,6 +403,17 @@ enum Copy {
     static func missingAkaiutil(_ paths: [String]) -> String {
         "Bundled akaiutil was not found. Checked:\n" + paths.joined(separator: "\n")
     }
+
+    static func notAkaiImage(_ language: AppLanguage) -> String {
+        switch language {
+        case .english:
+            "This looks like a standard ISO9660 disc image, not an Akai sampler image. A normal ISO opens directly in Finder (double-click) or with `hdiutil attach`. This app only handles Akai S900/S1000/S3000 sampler discs, which macOS cannot mount on its own."
+        case .chinese:
+            "这看起来是标准的 ISO9660 光盘镜像，不是 Akai 采样器镜像。普通 ISO 直接在访达里双击即可挂载（或用 `hdiutil attach`）。本工具只处理 macOS 自身无法挂载的 Akai S900/S1000/S3000 采样器光盘。"
+        case .japanese:
+            "これは標準的な ISO9660 ディスクイメージのようで、Akai サンプラーのイメージではありません。通常の ISO は Finder でダブルクリックすればマウントできます（または `hdiutil attach`）。本アプリは macOS が単体でマウントできない Akai S900/S1000/S3000 サンプラーディスク専用です。"
+        }
+    }
 }
 
 struct ExtractionJob: Identifiable, Equatable {
@@ -782,6 +793,7 @@ enum AppError: LocalizedError {
     case missingAkaiutil([String])
     case processFailed(String, Int32, String)
     case invalidWav(String)
+    case notAkaiImage(String)
 
     var errorDescription: String? {
         switch self {
@@ -791,6 +803,26 @@ enum AppError: LocalizedError {
             return "\(command) exited with status \(status).\(output.isEmpty ? "" : "\n\(output)")"
         case .invalidWav(let message):
             return message
+        case .notAkaiImage(let message):
+            return message
+        }
+    }
+}
+
+enum ImageFormat {
+    /// Akai sampler images are NOT ISO9660. If the file carries the ISO9660
+    /// "CD001" volume-descriptor signature at offset 0x8001, it's a normal disc
+    /// image that akaiutil cannot read — surface a friendly message instead of
+    /// letting akaiutil emit cryptic "invalid partition" / "tar error" output.
+    static func ensureAkaiImage(_ url: URL, language: AppLanguage) throws {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return }
+        defer { try? handle.close() }
+        guard (try? handle.seek(toOffset: 0x8000)) != nil else { return }
+        let bytes = [UInt8](handle.readData(ofLength: 6))
+        guard bytes.count == 6 else { return }
+        // byte 0 = volume-descriptor type; bytes 1...5 spell "CD001"
+        if bytes[1] == 0x43, bytes[2] == 0x44, bytes[3] == 0x30, bytes[4] == 0x30, bytes[5] == 0x31 {
+            throw AppError.notAkaiImage(Copy.notAkaiImage(language))
         }
     }
 }
@@ -803,6 +835,7 @@ enum AkaiExtractor {
         language: AppLanguage,
         log: @escaping (String) -> Void
     ) async throws -> ExtractionResult {
+        try ImageFormat.ensureAkaiImage(imageURL, language: language)
         let akaiutil = try ToolLocator.akaiutil()
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: outputURL, withIntermediateDirectories: true)

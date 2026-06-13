@@ -24,6 +24,13 @@ BIN="$AKAIUTIL_SRC/akaiutil"
 
 die() { echo "vse: error: $*" >&2; exit 1; }
 
+# Akai images are NOT ISO9660. A standard ISO9660 carries "CD001" at offset
+# 0x8001 (sector 16, byte 1). Detect that to give a clear message instead of
+# letting akaiutil emit cryptic "invalid partition" / "tar error" output.
+is_iso9660() {
+  [ "$(dd if="$1" bs=1 skip=32769 count=5 2>/dev/null)" = "CD001" ]
+}
+
 cmd_build() {
   [ -f "$AKAIUTIL_SRC/Makefile" ] || die "akaiutil source missing at $AKAIUTIL_SRC"
   command -v make >/dev/null || die "make not found (install Xcode Command Line Tools, or build-essential on Linux)"
@@ -49,6 +56,11 @@ cmd_extract() {
   local img="${1:-}" out="${2:-}"
   { [ -n "$img" ] && [ -n "$out" ]; } || die "usage: $(basename "$0") extract <image> <outdir>"
   [ -f "$img" ] || die "no such image: $img"
+  if is_iso9660 "$img"; then
+    die "'$img' looks like a standard ISO9660 disc image, not an Akai sampler image.
+       A normal ISO mounts directly in Finder (double-click) or via 'hdiutil attach \"$img\"'.
+       vse only reads Akai S900/S1000/S3000 sampler images that macOS cannot mount itself."
+  fi
   mkdir -p "$out"
   local out_abs; out_abs="$(cd "$out" && pwd)"
   local tar_tmp; tar_tmp="$(mktemp -t vse_XXXXXX).tar"
