@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# vse — vintage-sampler-extractor
+# vse — vintage-samplerCD-extractor
 #
 # Extract audio from Akai S900 / S1000 / S3000 sampler CD-ROM images (the
 # "ISO" files that aren't really ISO9660) to WAV, and automatically rejoin
@@ -125,7 +125,7 @@ cmd_all() {
 
 usage() {
   cat <<EOF
-vse — vintage-sampler-extractor
+vse — vintage-samplerCD-extractor
 
 Extract Akai S900/S1000/S3000 sampler CD-ROM images to WAV, and rejoin the
 format's split -L/-R mono files into stereo.

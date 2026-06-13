@@ -1,6 +1,6 @@
-# vintage-sampler-extractor (`vse`)
+# vintage-samplerCD-extractor (`vse`)
 
-[![shellcheck](https://github.com/umikado/vintage-sampler-extractor/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/umikado/vintage-sampler-extractor/actions/workflows/shellcheck.yml)
+[![shellcheck](https://github.com/umikado/vintage-samplerCD-extractor/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/umikado/vintage-samplerCD-extractor/actions/workflows/shellcheck.yml)
 [![license: GPL-2.0](https://img.shields.io/badge/license-GPL--2.0-blue.svg)](LICENSE)
 ![platform: macOS | Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
 
@@ -48,8 +48,8 @@ Tested on macOS (Apple Silicon). The akaiutil backend is vendored in this repo
 ## Install
 
 ```bash
-git clone https://github.com/umikado/vintage-sampler-extractor.git
-cd vintage-sampler-extractor
+git clone https://github.com/umikado/vintage-samplerCD-extractor.git
+cd vintage-samplerCD-extractor
 ./vse build          # compiles the akaiutil backend (once)
 ```
 
