@@ -31,6 +31,24 @@ is_iso9660() {
   [ "$(dd if="$1" bs=1 skip=32769 count=5 2>/dev/null)" = "CD001" ]
 }
 
+# Raw CD images (the .bin from a .bin/.cue rip) store 2352-byte sectors:
+# 12 sync + 4 header + 2048 user data + 288 ECC. They start with the CD sync
+# bytes 00 FF*10 00 and their size is a multiple of 2352. akaiutil needs the
+# flat 2048-byte data stream, so detect and de-interleave these.
+is_raw_cd() {
+  local sz hex
+  sz=$(wc -c < "$1")
+  [ "$((sz % 2352))" -eq 0 ] || return 1
+  hex=$(od -An -tx1 -N12 "$1" 2>/dev/null | tr -d ' \n')
+  [ "$hex" = "00ffffffffffffffffffff00" ]
+}
+
+# Extract the 2048 user-data bytes from each 2352-byte Mode-1 sector (skip the
+# 16-byte sync+header and the trailing 288-byte ECC).
+deinterleave_raw_cd() {  # <in> <out>
+  perl -e 'binmode STDIN; binmode STDOUT; while (read(STDIN,$s,2352)==2352){ print substr($s,16,2048) }' < "$1" > "$2"
+}
+
 cmd_build() {
   [ -f "$AKAIUTIL_SRC/Makefile" ] || die "akaiutil source missing at $AKAIUTIL_SRC"
   command -v make >/dev/null || die "make not found (install Xcode Command Line Tools, or build-essential on Linux)"
@@ -61,15 +79,30 @@ cmd_extract() {
        A normal ISO mounts directly in Finder (double-click) or via 'hdiutil attach \"$img\"'.
        vse only reads Akai S900/S1000/S3000 sampler images that macOS cannot mount itself."
   fi
+  # Raw CD .bin (2352-byte sectors) -> de-interleave to a flat data image first.
+  local src_img="$img" flat_tmp=""
+  if is_raw_cd "$img"; then
+    command -v perl >/dev/null || die "perl is needed to convert raw .bin CD images (not found)"
+    echo ">> '$img' is a raw CD image (2352-byte sectors) — de-interleaving to flat data ..."
+    flat_tmp="$(mktemp -t vse_flat_XXXXXX).img"
+    deinterleave_raw_cd "$img" "$flat_tmp"
+    if is_iso9660 "$flat_tmp"; then
+      rm -f "$flat_tmp"
+      die "'$img' is a raw image of a standard ISO9660 disc, not an Akai sampler disc.
+       Mount it as a normal CD instead; vse only reads Akai sampler images."
+    fi
+    src_img="$flat_tmp"
+  fi
   mkdir -p "$out"
   local out_abs; out_abs="$(cd "$out" && pwd)"
   local tar_tmp; tar_tmp="$(mktemp -t vse_XXXXXX).tar"
   echo ">> reading '$img' (read-only) and converting samples to WAV ..."
   # tarcwav: tar the whole /disk0 tree, converting sample files to WAV on the way out
-  printf 'cd /disk0\ntarcwav %s\nexit\n' "$tar_tmp" | "$BIN" -r "$img"
+  printf 'cd /disk0\ntarcwav %s\nexit\n' "$tar_tmp" | "$BIN" -r "$src_img"
   echo ">> unpacking into: $out_abs"
   tar -xf "$tar_tmp" -C "$out_abs"
   rm -f "$tar_tmp"
+  [ -n "$flat_tmp" ] && rm -f "$flat_tmp"
   # akaiutil stamps directories with file-like mode 0600 (no search bit), which
   # makes Finder/ls report "permission denied". Capital X adds execute to
   # directories only, never to plain WAV files.

@@ -414,6 +414,17 @@ enum Copy {
             "これは標準的な ISO9660 ディスクイメージのようで、Akai サンプラーのイメージではありません。通常の ISO は Finder でダブルクリックすればマウントできます（または `hdiutil attach`）。本アプリは macOS が単体でマウントできない Akai S900/S1000/S3000 サンプラーディスク専用です。"
         }
     }
+
+    static func convertingRawCD(_ language: AppLanguage) -> String {
+        switch language {
+        case .english:
+            "Raw CD image (.bin, 2352-byte sectors) detected — converting to a flat data image first ..."
+        case .chinese:
+            "检测到 raw CD 镜像（.bin，2352 字节/扇区）——先转换成扁平数据镜像 ..."
+        case .japanese:
+            "raw CD イメージ（.bin、2352 バイト/セクタ）を検出しました — まずフラットなデータイメージに変換します ..."
+        }
+    }
 }
 
 struct ExtractionJob: Identifiable, Equatable {
@@ -825,6 +836,42 @@ enum ImageFormat {
             throw AppError.notAkaiImage(Copy.notAkaiImage(language))
         }
     }
+
+    /// Raw CD images (the .bin from a .bin/.cue rip) use 2352-byte sectors that
+    /// start with the CD sync 00 FF*10 00; their size is a multiple of 2352.
+    /// akaiutil needs the flat 2048-byte data stream, so detect these.
+    static func isRawCD(_ url: URL) -> Bool {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? Int, size > 0, size % 2352 == 0,
+              let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        let head = [UInt8](handle.readData(ofLength: 12))
+        guard head.count == 12, head[0] == 0x00, head[11] == 0x00 else { return false }
+        return head[1...10].allSatisfy { $0 == 0xFF }
+    }
+
+    /// Extract the 2048 user-data bytes from each 2352-byte Mode-1 sector (skip
+    /// the 16-byte sync+header and the trailing 288-byte ECC) into a flat image.
+    static func deinterleaveRawCD(_ src: URL, to dst: URL) throws {
+        let inH = try FileHandle(forReadingFrom: src)
+        defer { try? inH.close() }
+        FileManager.default.createFile(atPath: dst.path, contents: nil)
+        let outH = try FileHandle(forWritingTo: dst)
+        defer { try? outH.close() }
+        let chunk = 2352 * 2048   // ~4.8 MB per read
+        while true {
+            let data = inH.readData(ofLength: chunk)
+            if data.isEmpty { break }
+            var out = Data()
+            out.reserveCapacity((data.count / 2352) * 2048)
+            var off = 0
+            while off + 2352 <= data.count {
+                out.append(data.subdata(in: (off + 16)..<(off + 16 + 2048)))
+                off += 2352
+            }
+            try outH.write(contentsOf: out)
+        }
+    }
 }
 
 enum AkaiExtractor {
@@ -840,6 +887,21 @@ enum AkaiExtractor {
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: outputURL, withIntermediateDirectories: true)
 
+        // Raw CD .bin (2352-byte sectors) -> de-interleave to a flat image first.
+        var sourceImageURL = imageURL
+        var tempFlatURL: URL?
+        if ImageFormat.isRawCD(imageURL) {
+            log(Copy.convertingRawCD(language))
+            let flat = fileManager.temporaryDirectory
+                .appendingPathComponent("vse-flat-\(UUID().uuidString)")
+                .appendingPathExtension("img")
+            try ImageFormat.deinterleaveRawCD(imageURL, to: flat)
+            try ImageFormat.ensureAkaiImage(flat, language: language)  // a raw ISO9660 disc, too
+            tempFlatURL = flat
+            sourceImageURL = flat
+        }
+        defer { if let tempFlatURL { try? fileManager.removeItem(at: tempFlatURL) } }
+
         let tarURL = fileManager.temporaryDirectory
             .appendingPathComponent("akai-\(UUID().uuidString)")
             .appendingPathExtension("tar")
@@ -848,7 +910,7 @@ enum AkaiExtractor {
         log(Copy.readingImage(language))
         let akaiOutput = try await ProcessRunner.run(
             executableURL: akaiutil,
-            arguments: ["-r", imageURL.path],
+            arguments: ["-r", sourceImageURL.path],
             standardInput: "cd /disk0\ntarcwav \(tarURL.path)\nexit\n"
         )
         if !akaiOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

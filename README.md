@@ -12,7 +12,9 @@ These classic 1990s sample-CD images are usually distributed as `.iso` files,
 but they are **not** ISO9660. They use Akai's own sampler partition format, so
 macOS Disk Utility, `hdiutil`, and archive tools like The Unarchiver simply
 fail to open them. `vse` reads that format directly and gives you ordinary WAV
-files, organised by the disc's original partition/volume/bank structure.
+files, organised by the disc's original partition/volume/bank structure. It takes
+flat dumps (`.iso`/`.img`) as well as raw `.bin` CD rips (2352-byte sectors), which
+it de-interleaves to flat data automatically.
 
 ```
 $ vse all "Distorted Reality 2 [Disc 1].iso" ./out
